@@ -1,0 +1,10 @@
+{% extends "email/layout.html" %}
+
+{% block title %}Welcome!{% endblock %}
+
+{% block header %}Welcome to {{ AppConfig.SITE_NAME }}{% endblock %}
+
+{% block content %}
+    <p>Hello {{ user.full_name or user.email }},</p>
+    <p>Thank you for registering! Your account has been successfully created.</p>
+{% endblock %}
