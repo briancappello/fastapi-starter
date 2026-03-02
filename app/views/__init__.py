@@ -12,8 +12,11 @@ api_v1 = APIRouter(prefix="/api/v1", default_response_class=ORJSONResponse)
 
 
 def register_views(app: FastAPI) -> None:
+    from .kafka import router as kafka_router
+
     app.include_router(root)
     app.include_router(api_v1)
+    app.include_router(kafka_router)
 
 
 @root.get("/")

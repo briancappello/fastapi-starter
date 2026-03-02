@@ -58,6 +58,7 @@ __all__ = [
     "UserUpdate",
     "UserManager",
     "fastapi_users",
+    "register_auth_views",
     "require_user",
     "user_manager_factory",
 ]

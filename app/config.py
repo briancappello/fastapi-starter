@@ -13,12 +13,13 @@ else:
 
 class Config:
     ROOT_DIR = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    TEMPLATE_DIR = os.path.join(ROOT_DIR, "app", "templates")
 
     SITE_NAME = os.getenv("SITE_NAME", "FastAPI Starter")
     BASE_URL = "http://localhost:8000"
-
     SECRET_KEY: str = os.getenv("SECRET_KEY", "change-me-secret!")
 
+    # DB
     SQL_DB_URL: str = os.getenv(
         "SQL_DB_URL",
         default="{engine}://{user}:{pw}@{host}:{port}/{db}".format(
@@ -31,12 +32,20 @@ class Config:
         ),
     )
 
+    # Auth
     AUTH_URL_PREFIX = "/auth/v1"
     AUTH_REQUIRE_USER_VERIFIED = True
     AUTH_TOKEN_LIFETIME_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
+    # Kafka
+    KAFKA_ENABLED: bool = os.getenv("KAFKA_ENABLED", "true").lower() == "true"
+    KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    KAFKA_CONSUMERS: str = os.getenv(
+        "KAFKA_CONSUMERS", "all"
+    )  # "all", "none", or comma-separated names
+
+    # Mail
     RESEND_API_KEY: str = os.getenv("RESEND_API_KEY")
-    TEMPLATE_DIR = os.path.join(ROOT_DIR, "app", "templates")
     MAIL_CONFIG = MailConfig(
         # MAIL_SENDER=Resend(api_key=RESEND_API_KEY),
         MAIL_SERVER="localhost",
