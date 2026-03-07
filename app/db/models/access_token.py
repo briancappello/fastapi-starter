@@ -17,7 +17,10 @@ class AccessToken(SQLAlchemyBaseAccessTokenTable[int], Base):
     token: Mapped[str] = mapped_column(String(length=43), primary_key=True)
 
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="cascade"))
-    user: Mapped["User"] = relationship(back_populates="access_tokens")
+    user: Mapped["User"] = relationship(
+        back_populates="access_tokens",
+        lazy="selectin",  # Use selectin for async compatibility
+    )
 
     created_at: Mapped[datetime | None] = mapped_column(
         nullable=False,

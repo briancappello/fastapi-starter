@@ -17,7 +17,7 @@ class Config:
 
     SITE_NAME = os.getenv("SITE_NAME", "FastAPI Starter")
     BASE_URL = "http://localhost:8000"
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "change-me-secret!")
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "change-me-in-production-secret-key!")
 
     # DB
     SQL_DB_URL: str = os.getenv(
@@ -48,6 +48,7 @@ class Config:
     RESEND_API_KEY: str = os.getenv("RESEND_API_KEY")
     MAIL_CONFIG = MailConfig(
         # MAIL_SENDER=Resend(api_key=RESEND_API_KEY),
+        ADMIN_CONTACT_EMAIL=os.getenv("ADMIN_CONTACT_EMAIL"),
         MAIL_SERVER="localhost",
         MAIL_PORT=1025,
         MAIL_USERNAME="",

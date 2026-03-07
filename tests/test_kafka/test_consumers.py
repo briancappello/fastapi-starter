@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import orjson
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
 import pytest
 
 from sqlalchemy import select
@@ -193,12 +193,18 @@ class TestKafkaConsumerRegistry:
         mock_factory = MagicMock()
         registry = KafkaConsumerRegistry(session_factory=mock_factory)
 
-        config1 = ConsumerConfig[KafkaMessageSchema](name="feed-one", topics=["t1"],
-            schema=KafkaMessageSchema, handler=AsyncMock())
-        config2 = ConsumerConfig[KafkaMessageSchema](name="feed-two", topics=["t2"],
-            schema=KafkaMessageSchema,handler=AsyncMock())
-        config3 = ConsumerConfig[KafkaMessageSchema](name="feed-three", topics=["t3"],
-            schema=KafkaMessageSchema, handler=AsyncMock())
+        config1 = ConsumerConfig[KafkaMessageSchema](
+            name="feed-one", topics=["t1"], schema=KafkaMessageSchema, handler=AsyncMock()
+        )
+        config2 = ConsumerConfig[KafkaMessageSchema](
+            name="feed-two", topics=["t2"], schema=KafkaMessageSchema, handler=AsyncMock()
+        )
+        config3 = ConsumerConfig[KafkaMessageSchema](
+            name="feed-three",
+            topics=["t3"],
+            schema=KafkaMessageSchema,
+            handler=AsyncMock(),
+        )
 
         registry.register(config1).register(config2).register(config3)
 

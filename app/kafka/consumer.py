@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import orjson
 import logging
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
+import orjson
 
 from aiokafka import AIOKafkaConsumer, TopicPartition
 from sqlalchemy import select

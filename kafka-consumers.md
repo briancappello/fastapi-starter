@@ -308,7 +308,7 @@ Tests use mocked `AIOKafkaConsumer` - no real Kafka needed:
 
 ```bash
 # Run kafka tests
-KAFKA_ENABLED=false uv run pytest tests/kafka/ -v
+KAFKA_ENABLED=false uv run pytest tests/test_kafka/ -v
 
 # Run all tests
 KAFKA_ENABLED=false uv run pytest -v

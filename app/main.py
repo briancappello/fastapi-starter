@@ -1,13 +1,13 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.responses import ORJSONResponse
 
-from .admin import register_admins
+from .admin import register_admin_views
 from .auth import register_auth_views
 from .db import async_session_factory
 from .kafka import CONSUMER_CONFIGS, KafkaConsumerRegistry
-from .views import register_views
+from .utils import collect_objects
 
 
 # Global registry for Kafka consumers
@@ -30,6 +30,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan, default_response_class=ORJSONResponse)
 
-register_admins(app)
+register_admin_views(app)
 register_auth_views(app)
-register_views(app)
+
+for router in collect_objects(
+    APIRouter,
+    module_paths=["app.views"],
+    instances=True,
+):
+    app.include_router(router)

@@ -1,7 +1,7 @@
 import asyncio
 import functools
 
-import click
+from . import click
 
 
 def async_command(f=None):
@@ -24,9 +24,11 @@ def async_command(f=None):
     return wrapper
 
 
-@click.group()
-def main():
-    pass
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx: click.Context):
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(ctx.command.get_command(ctx, "dev"))
 
 
 @main.group()

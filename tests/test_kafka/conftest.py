@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import orjson
-
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 

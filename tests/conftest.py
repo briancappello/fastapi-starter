@@ -1,8 +1,9 @@
+"""Shared pytest fixtures for all tests."""
+
 from typing import AsyncGenerator, Generator
 
 import pytest
 
-from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,27 +11,24 @@ from sqlalchemy.orm import sessionmaker
 from app import app
 from app.auth import UserManager, user_manager_factory
 from app.config import Config
-from app.db import async_session_factory, get_async_session
-from app.db.models import AccessToken, Base
+from app.db import async_session
+from app.db.models import Base, User
 from app.schema import UserCreate
+
+from .client import TestClient
+
+
+# Set a proper length secret key to avoid InsecureKeyLengthWarning from PyJWT.
+# Must be at least 32 bytes for SHA256.
+_TEST_SECRET_KEY = "test-secret-key-that-is-at-least-32-bytes-long!"
+Config.SECRET_KEY = _TEST_SECRET_KEY
+UserManager.reset_password_token_secret = _TEST_SECRET_KEY
+UserManager.verification_token_secret = _TEST_SECRET_KEY
 
 
 @pytest.fixture(autouse=True)
 def anyio_backend():
     return "asyncio"
-
-
-@pytest.fixture
-async def client(session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    app.dependency_overrides[get_async_session] = lambda: session
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        yield client
-
-    del app.dependency_overrides[get_async_session]
 
 
 @pytest.fixture
@@ -58,12 +56,13 @@ def db_schema_name(request: pytest.FixtureRequest) -> str | None:
 
 @pytest.fixture
 def engine(db_connection_string: str) -> Generator[AsyncEngine, None, None]:
-    yield create_async_engine(
+    eng = create_async_engine(
         db_connection_string,
         future=True,
         pool_size=20,
         max_overflow=2,
     )
+    yield eng
 
 
 @pytest.fixture
@@ -99,7 +98,6 @@ async def session(
         if not nested.is_active:
             nested = connection.sync_connection.begin_nested()
 
-    async_session_factory.configure(bind=connection)
     yield async_session
 
     await transaction.rollback()
@@ -109,55 +107,90 @@ async def session(
 
 
 @pytest.fixture
+async def client(session: AsyncSession) -> AsyncGenerator[TestClient, None]:
+    """
+    Test client with authentication helpers.
+
+    Usage:
+        # Unauthenticated request
+        response = await client.get("/public/endpoint")
+
+        # Authenticated as regular user
+        response = await client.with_user(user).get("/protected/endpoint")
+
+        # Authenticated as admin
+        response = await client.with_user(admin).get("/admin/endpoint")
+    """
+    from httpx import ASGITransport
+
+    app.dependency_overrides[async_session] = lambda: session
+
+    # Use https:// so cookies with Secure flag work correctly
+    test_client = TestClient(
+        transport=ASGITransport(app=app),
+        base_url="https://test",
+        session=session,
+    )
+
+    async with test_client:
+        yield test_client
+
+    del app.dependency_overrides[async_session]
+
+
+@pytest.fixture
 def user_manager(session: AsyncSession) -> UserManager:
+    """User manager for creating test users."""
     return user_manager_factory(session, send_emails=False)
 
 
 @pytest.fixture
-async def user(user_manager):
-    user_create = UserCreate(
-        email="test@example.com",
-        password="password",
-        is_active=True,
-        is_verified=True,
-        is_superuser=False,
-        first_name="Test",
-        last_name="User",
+async def user(user_manager) -> User:
+    """A regular verified user."""
+    return await user_manager.create(
+        UserCreate(
+            email="test@example.com",
+            password="password",
+            is_active=True,
+            is_verified=True,
+            is_superuser=False,
+            first_name="Test",
+            last_name="User",
+        )
     )
-    return await user_manager.create(user_create)
 
 
 @pytest.fixture
-async def superuser(user_manager):
-    user_create = UserCreate(
-        email="admin@example.com",
-        password="password",
-        is_active=True,
-        is_verified=True,
-        is_superuser=True,
-        first_name="Admin",
-        last_name="User",
+async def superuser(user_manager) -> User:
+    """Alias for admin fixture (backward compatibility)."""
+    return await user_manager.create(
+        UserCreate(
+            email="admin@example.com",
+            password="password",
+            is_active=True,
+            is_verified=True,
+            is_superuser=True,
+            first_name="Admin",
+            last_name="User",
+        )
     )
-    return await user_manager.create(user_create)
 
 
 @pytest.fixture
-async def authed_client(client, user, session):
-    token = "test_token"
-    access_token = AccessToken(token=token, user_id=user.id)
-    session.add(access_token)
-    await session.commit()
+async def authed_client(client: TestClient, user: User) -> TestClient:
+    """
+    Client authenticated as regular user (backward compatibility).
 
-    client.headers["Authorization"] = f"Bearer {token}"
-    return client
+    Prefer using: client.with_user(user)
+    """
+    return client.with_user(user)
 
 
 @pytest.fixture
-async def authed_superuser_client(client, superuser, session):
-    token = "admin_token"
-    access_token = AccessToken(token=token, user_id=superuser.id)
-    session.add(access_token)
-    await session.commit()
+async def authed_superuser_client(client: TestClient, admin: User) -> TestClient:
+    """
+    Client authenticated as admin (backward compatibility).
 
-    client.headers["Authorization"] = f"Bearer {token}"
-    return client
+    Prefer using: client.with_user(admin)
+    """
+    return client.with_user(admin)

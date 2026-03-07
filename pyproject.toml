@@ -25,6 +25,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "nest-asyncio>=1.6.0",
     "pyqt6>=6.10.2",
     "pytest >= 9.0.2",
     "pytest-xdist>=3.8.0",

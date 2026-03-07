@@ -645,6 +645,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "nest-asyncio" },
     { name = "pyqt6" },
     { name = "pytest" },
     { name = "pytest-xdist" },
@@ -675,6 +676,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "nest-asyncio", specifier = ">=1.6.0" },
     { name = "pyqt6", specifier = ">=6.10.2" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },

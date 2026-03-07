@@ -27,9 +27,9 @@ class ModelManager(Generic[ModelT]):
 
     For example::
 
-        from fin.db import AsyncSession
-        from fin.db.model_manager import ModelManager
-        from fin.db.models import User
+        from app.db import AsyncSession
+        from app.db.model_manager import ModelManager
+        from app.db.models import User
 
 
         class UserManager(ModelManager[User]):

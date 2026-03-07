@@ -1,8 +1,8 @@
-import click
 import uvicorn
 
 from tabulate import tabulate
 
+from . import click
 from .groups import main
 
 
