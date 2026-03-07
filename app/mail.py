@@ -1,5 +1,6 @@
-from functools import cached_property, lru_cache
-from typing import TYPE_CHECKING, ClassVar
+from datetime import datetime, timezone
+from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from fastapi_mail import ConnectionConfig as BaseConnectionConfig
 from fastapi_mail import FastMail as BaseFastMail
@@ -67,6 +68,7 @@ class Email(BaseMessageSchema):
         if ctx is None:
             return None
 
+        ctx.setdefault("now", datetime.now(timezone.utc))
         ctx.setdefault("AppConfig", get_app_config(copy=True))
         return ctx
 
@@ -86,6 +88,7 @@ class MailConfig(BaseConnectionConfig):
     """
 
     MAIL_SENDER: MailSender | None = None
+    ADMIN_CONTACT_EMAIL: str | None = None
 
 
 class Resend(MailSender):

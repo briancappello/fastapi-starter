@@ -25,6 +25,7 @@ class User(SQLAlchemyBaseUserTable[int], Base):
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
+        lazy="selectin",  # Use selectin for async compatibility
     )
 
     def __str__(self):

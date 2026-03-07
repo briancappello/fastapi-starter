@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Callable
 
 from sqlalchemy import select
@@ -27,7 +28,7 @@ async_engine: AsyncEngine = create_async_engine(
     echo=False,
 )
 
-async_session_factory: Callable[[], AsyncSession] = async_sessionmaker(
+async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
     async_engine,
     expire_on_commit=False,
     autocommit=False,
@@ -36,7 +37,7 @@ async_session_factory: Callable[[], AsyncSession] = async_sessionmaker(
 
 
 # for DI
-async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+async def async_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         yield session
 
@@ -46,7 +47,7 @@ __all__ = [
     "AsyncSession",
     "async_engine",
     "async_session_factory",
-    "get_async_session",
+    "async_session",
     "select",
     "selectinload",
 ]

@@ -103,3 +103,22 @@ class UserManager(IntegerIDMixin, BaseUserManager[models.User, int]):
             ),
             request,
         )
+
+    async def on_after_update(
+        self,
+        user: models.User,
+        update_dict: dict,
+        request: Request | None = None,
+    ) -> None:
+        if "password" in update_dict:
+            await self.send_email(
+                Email(
+                    subject="Your Password Has Been Changed",
+                    recipients=[user.email],
+                    template="email/user-password-changed.html",
+                    template_context={
+                        "user": user,
+                    },
+                ),
+                request,
+            )

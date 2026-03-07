@@ -30,4 +30,14 @@ class UserAdmin(BaseModelView, model=User):
         User.is_active,
         User.is_superuser,
         User.access_tokens,
+        User.created_at,
+        User.updated_at,
+    )
+
+    # Exclude auto-managed fields from create/edit forms
+    form_excluded_columns = (
+        User.id,
+        User.created_at,
+        User.updated_at,
+        User.access_tokens,
     )

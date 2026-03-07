@@ -9,15 +9,28 @@ from .require_user import require_user
 
 
 def register_auth_views(app: FastAPI) -> None:
-    from .dependencies import jwt_auth_backend
+    from .dependencies import cookie_auth_backend, jwt_auth_backend
 
-    # /auth/v1/login (POST multipart/form-data with fields username="email", password="pw")
-    # /auth/v1/logout (authed POST)
+    # /auth/v1/jwt/login (POST multipart/form-data with fields username="email", password="pw")
+    # /auth/v1/jwt/logout (authed POST)
+    # Returns bearer token in response body
     app.include_router(
         fastapi_users.get_auth_router(
             jwt_auth_backend, requires_verification=Config.AUTH_REQUIRE_USER_VERIFIED
         ),
-        prefix=Config.AUTH_URL_PREFIX,
+        prefix=f"{Config.AUTH_URL_PREFIX}/jwt",
+        tags=["auth"],
+    )
+
+    # /auth/v1/cookie/login (POST multipart/form-data with fields username="email", password="pw")
+    # /auth/v1/cookie/logout (authed POST)
+    # Sets httpOnly cookie
+    app.include_router(
+        fastapi_users.get_auth_router(
+            cookie_auth_backend,
+            requires_verification=Config.AUTH_REQUIRE_USER_VERIFIED,
+        ),
+        prefix=f"{Config.AUTH_URL_PREFIX}/cookie",
         tags=["auth"],
     )
 
