@@ -1,5 +1,3 @@
-import click
-
 from tabulate import tabulate
 
 from app.auth import user_manager_factory
@@ -7,6 +5,7 @@ from app.db import async_session_factory
 from app.db.managers import UserModelManager
 from app.schema import UserCreate, UserRead, UserUpdate
 
+from . import click
 from .groups import async_command, users
 
 
@@ -120,7 +119,7 @@ async def set_password(
             user,
         )
         await user_manager.on_after_reset_password(user)
-        click.echo(f"User {email} activated")
+        click.echo(f"User {email} password updated")
 
 
 @users.command()
