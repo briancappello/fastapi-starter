@@ -17,14 +17,20 @@ We override upstream to do the following:
 - Increase the max help string length to 120 characters
 - Show default values for options automatically
 - Show help instead of error when command with required params is invoked with no args
+- Support ``async def`` callbacks without needing a separate decorator
+- Support FastAPI-style ``Depends()`` for dependency injection in CLI commands
 """
 
+import asyncio as _asyncio
 import inspect as _inspect
+from contextlib import AsyncExitStack as _AsyncExitStack
 
 import click
 
 from click import *  # noqa: F401,F403
 from click.formatting import join_options as _join_options
+from fastapi import Depends  # noqa: F401
+from fastapi.params import Depends as _DependsClass
 
 
 CLI_HELP_STRING_MAX_LEN = 120
@@ -32,6 +38,21 @@ DEFAULT_CONTEXT_SETTINGS = dict(
     help_option_names=("-h", "--help"),
     show_default=True,
 )
+
+# Module-level dependency overrides, analogous to FastAPI's app.dependency_overrides.
+# Map a dependency callable to a replacement callable for testing.
+#
+# Usage in tests::
+#
+#     from app.cli.click import dependency_overrides
+#
+#     dependency_overrides[async_session] = my_test_session_factory
+#     try:
+#         runner.invoke(main, ["users", "list"])
+#     finally:
+#         dependency_overrides.clear()
+#
+dependency_overrides: dict = {}
 
 
 def _update_ctx_settings(context_settings):
@@ -43,12 +64,179 @@ def _update_ctx_settings(context_settings):
     return rv
 
 
+def _get_depends_params(func):
+    """
+    Extract parameters with ``Depends()`` defaults from a function signature.
+
+    Returns a dict mapping parameter name to the ``Depends`` instance.
+    Only inspects the immediate function; nested dependency resolution
+    happens at resolve time.
+    """
+    depends = {}
+    sig = _inspect.signature(func)
+    for name, param in sig.parameters.items():
+        if isinstance(param.default, _DependsClass):
+            depends[name] = param.default
+    return depends
+
+
+async def _resolve_dependencies(func, stack, cache=None):
+    """
+    Resolve all ``Depends()`` parameters for *func*.
+
+    Args:
+        func: The callable whose signature contains ``Depends()`` defaults.
+        stack: An ``AsyncExitStack`` used to manage cleanup of async generators.
+        cache: A dict for caching resolved dependencies (shared across the
+               entire resolution tree so that the same dependency used in
+               multiple places is only called once when ``use_cache=True``).
+
+    Returns:
+        A dict of ``{param_name: resolved_value}``.
+    """
+    if cache is None:
+        cache = {}
+
+    resolved = {}
+    for name, dep in _get_depends_params(func).items():
+        dep_fn = dep.dependency
+        if dep_fn is None:
+            # Depends() without an argument uses the type annotation
+            sig = _inspect.signature(func)
+            dep_fn = sig.parameters[name].annotation
+            if dep_fn is _inspect.Parameter.empty:
+                raise TypeError(
+                    f"Depends() on parameter '{name}' of {func.__qualname__} "
+                    f"has no dependency callable and no type annotation to infer from."
+                )
+
+        # Apply overrides
+        dep_fn = dependency_overrides.get(dep_fn, dep_fn)
+
+        # Check cache
+        cache_key = dep_fn
+        if dep.use_cache and cache_key in cache:
+            resolved[name] = cache[cache_key]
+            continue
+
+        # Recursively resolve sub-dependencies
+        sub_kwargs = await _resolve_dependencies(dep_fn, stack, cache)
+
+        # Call the dependency
+        result = dep_fn(**sub_kwargs)
+
+        if _inspect.isasyncgen(result):
+            # async generator (e.g. ``async_session`` that yields)
+            value = await stack.enter_async_context(_asyncgen_to_ctx(result))
+        elif _inspect.isawaitable(result):
+            value = await result
+        elif _inspect.isgenerator(result):
+            # sync generator
+            value = await stack.enter_async_context(_syncgen_to_ctx(result))
+        else:
+            value = result
+
+        if dep.use_cache:
+            cache[cache_key] = value
+        resolved[name] = value
+
+    return resolved
+
+
+class _asyncgen_to_ctx:
+    """Wrap an async generator as an async context manager for ``AsyncExitStack``.
+
+    Mirrors ``contextlib.asynccontextmanager`` behavior: on normal exit the
+    generator is advanced past its ``yield``; on exception exit the exception
+    is thrown into the generator via ``athrow`` so that ``try/except/finally``
+    around the ``yield`` works as expected.
+    """
+
+    def __init__(self, agen):
+        self._agen = agen
+
+    async def __aenter__(self):
+        return await self._agen.__anext__()
+
+    async def __aexit__(self, typ, val, tb):
+        if typ is None:
+            # Normal exit — advance past yield
+            try:
+                await self._agen.__anext__()
+            except StopAsyncIteration:
+                return False
+            else:
+                raise RuntimeError("async generator didn't stop")
+        else:
+            # Exception exit — throw into generator
+            try:
+                await self._agen.athrow(typ, val, tb)
+            except StopAsyncIteration as exc:
+                # Generator handled the exception and finished cleanly.
+                # Suppress the original exception only if it's the same one.
+                return exc is not val
+            except BaseException as exc:
+                # Generator re-raised or raised a different exception
+                if exc is not val:
+                    raise
+                return False
+            else:
+                raise RuntimeError("async generator didn't stop after athrow()")
+
+
+class _syncgen_to_ctx:
+    """Wrap a sync generator as an async context manager for ``AsyncExitStack``.
+
+    Same semantics as ``_asyncgen_to_ctx`` but for synchronous generators.
+    """
+
+    def __init__(self, gen):
+        self._gen = gen
+
+    async def __aenter__(self):
+        return next(self._gen)
+
+    async def __aexit__(self, typ, val, tb):
+        if typ is None:
+            try:
+                next(self._gen)
+            except StopIteration:
+                return False
+            else:
+                raise RuntimeError("generator didn't stop")
+        else:
+            try:
+                self._gen.throw(typ, val, tb)
+            except StopIteration as exc:
+                return exc is not val
+            except BaseException as exc:
+                if exc is not val:
+                    raise
+                return False
+            else:
+                raise RuntimeError("generator didn't stop after throw()")
+
+
 class Command(click.Command):
     """
-    Enhanced Command that displays arguments before the [OPTIONS] metavar
-    and prints arguments in a separate section from options.
+    Enhanced Command with the following features:
 
-    Also shows help automatically when required options/arguments are missing.
+    - Displays arguments before the [OPTIONS] metavar in usage
+    - Prints arguments in a separate section from options
+    - Shows help automatically when required options/arguments are missing
+    - Supports ``async def`` callbacks (runs them via ``asyncio.run``)
+    - Supports FastAPI-style ``Depends()`` for dependency injection
+
+    Example::
+
+        from app.cli import click
+        from app.db import async_session
+        from fastapi import Depends
+
+        @click.command()
+        async def my_command(session: AsyncSession = Depends(async_session)):
+            result = await session.execute(...)
+            click.echo(result)
     """
 
     def __init__(
@@ -64,6 +252,10 @@ class Command(click.Command):
         options_metavar="[OPTIONS]",
         **kwargs,
     ):
+        # If the callback has Depends() params, wrap it so Click never sees them
+        if callback is not None:
+            callback = self._wrap_callback(callback)
+
         super().__init__(
             name,
             callback=callback,
@@ -76,6 +268,47 @@ class Command(click.Command):
             options_metavar=options_metavar,
             **kwargs,
         )
+
+    @staticmethod
+    def _wrap_callback(callback):
+        """
+        Wrap *callback* to handle async execution and dependency injection.
+
+        This creates a synchronous wrapper that:
+        1. Resolves any ``Depends()`` parameters via ``_resolve_dependencies``
+        2. Calls the original callback (with ``asyncio.run`` if it's async)
+        3. Properly cleans up async generator dependencies via ``AsyncExitStack``
+
+        Parameters that have ``Depends()`` defaults are stripped from Click's
+        view — Click will never try to parse them as CLI options/arguments.
+        """
+        dep_params = _get_depends_params(callback)
+        is_async = _inspect.iscoroutinefunction(callback)
+
+        # Nothing to wrap if the callback is sync with no dependencies
+        if not dep_params and not is_async:
+            return callback
+
+        import functools
+
+        @functools.wraps(callback)
+        def wrapper(*args, **kwargs):
+            async def _run():
+                async with _AsyncExitStack() as stack:
+                    # Resolve dependencies
+                    if dep_params:
+                        resolved = await _resolve_dependencies(callback, stack)
+                        kwargs.update(resolved)
+
+                    # Call the actual callback
+                    if is_async:
+                        return await callback(*args, **kwargs)
+                    else:
+                        return callback(*args, **kwargs)
+
+            return _asyncio.run(_run())
+
+        return wrapper
 
     def make_context(self, info_name, args, parent=None, **extra):
         """

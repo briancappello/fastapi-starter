@@ -3,9 +3,8 @@
 import asyncio
 import signal
 
-import click
-
-from .groups import async_command, main
+from . import click
+from .groups import main
 
 
 @main.group()
@@ -31,7 +30,6 @@ def list_consumers():
 
 @kafka.command("run")
 @click.argument("consumers", required=False)
-@async_command
 async def run_consumers(consumers: str | None):
     """Run Kafka consumers (standalone mode, without HTTP server).
 

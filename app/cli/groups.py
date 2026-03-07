@@ -1,21 +1,27 @@
 import asyncio
 import functools
+import warnings
 
 from . import click
 
 
 def async_command(f=None):
     """
-    Decorator to add async support to click commands. Must be last:
+    Deprecated: async support is now built into the Command class.
 
-        @click.command()
-        @click.option(...)
-        @async_command
-        async def do_stuff():
-            pass
+    Simply declare your callback as ``async def`` and it will be run
+    automatically via ``asyncio.run()``. This decorator is kept only
+    for backwards compatibility and will be removed in a future version.
     """
     if f is None:
         return async_command
+
+    warnings.warn(
+        "async_command is deprecated. The Command class now handles async "
+        "callbacks automatically. Remove the @async_command decorator.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
@@ -25,10 +31,15 @@ def async_command(f=None):
 
 
 @click.group(invoke_without_command=True)
+@click.option("-p", "--port", type=int, default=None, help="Port to run the server on")
 @click.pass_context
-def main(ctx: click.Context):
+def main(ctx: click.Context, port: int | None):
     if ctx.invoked_subcommand is None:
-        ctx.invoke(ctx.command.get_command(ctx, "dev"))
+        dev_cmd = ctx.command.get_command(ctx, "dev")
+        kwargs = {}
+        if port is not None:
+            kwargs["port"] = port
+        ctx.invoke(dev_cmd, **kwargs)
 
 
 @main.group()

@@ -1,12 +1,14 @@
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 from tabulate import tabulate
 
 from app.auth import user_manager_factory
-from app.db import async_session_factory
+from app.db import async_session
 from app.db.managers import UserModelManager
 from app.schema import UserCreate, UserRead, UserUpdate
 
 from . import click
-from .groups import async_command, users
+from .groups import users
 
 
 @users.command()
@@ -17,7 +19,6 @@ from .groups import async_command, users
 @click.option("--verify/--no-verify", default=True)
 @click.option("--superuser/--no-superuser", default=False)
 @click.option("--send-email", is_flag=True, default=False)
-@async_command
 async def create(
     email: str,
     first_name: str,
@@ -26,124 +27,119 @@ async def create(
     verify: bool,
     superuser: bool,
     send_email: bool = False,
+    session: AsyncSession = Depends(async_session),
 ):
     """Create a new user."""
-    async with async_session_factory() as session:
-        user_manager = user_manager_factory(session, send_emails=send_email)
-        user = await user_manager.create(
-            UserCreate(
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-                password=password,
-                is_verified=verify,
-                is_superuser=superuser,
-            )
+    user_manager = user_manager_factory(session, send_emails=send_email)
+    user = await user_manager.create(
+        UserCreate(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            password=password,
+            is_verified=verify,
+            is_superuser=superuser,
         )
-        click.echo("User created:")
-        click.echo(UserRead.model_validate(user).model_dump_json(indent=2))
+    )
+    click.echo("User created:")
+    click.echo(UserRead.model_validate(user).model_dump_json(indent=2))
 
 
 @users.command()
 @click.option("-e", "--email", type=str, required=True)
-@async_command
 async def activate(
     email: str,
+    session: AsyncSession = Depends(async_session),
 ):
     """Activate a user."""
-    async with async_session_factory() as session:
-        user_manager = user_manager_factory(session, send_emails=False)
-        user = await user_manager.get_by_email(email)
-        user = await user_manager.update(
-            UserUpdate(
-                is_active=True,
-            ),
-            user,
-        )
-        click.echo(f"User {email} activated")
+    user_manager = user_manager_factory(session, send_emails=False)
+    user = await user_manager.get_by_email(email)
+    user = await user_manager.update(
+        UserUpdate(
+            is_active=True,
+        ),
+        user,
+    )
+    click.echo(f"User {email} activated")
 
 
 @users.command()
 @click.option("-e", "--email", type=str, required=True)
-@async_command
 async def deactivate(
     email: str,
+    session: AsyncSession = Depends(async_session),
 ):
     """Deactivate a user."""
-    async with async_session_factory() as session:
-        user_manager = user_manager_factory(session, send_emails=False)
-        user = await user_manager.get_by_email(email)
-        user = await user_manager.update(
-            UserUpdate(is_active=False),
-            user,
-        )
-        click.echo(f"User {email} deactivated")
+    user_manager = user_manager_factory(session, send_emails=False)
+    user = await user_manager.get_by_email(email)
+    user = await user_manager.update(
+        UserUpdate(is_active=False),
+        user,
+    )
+    click.echo(f"User {email} deactivated")
 
 
 @users.command()
 @click.option("-e", "--email", type=str, required=True)
 @click.option("--send-email", is_flag=True, default=False)
-@async_command
 async def verify(
     email: str,
     send_email: bool = False,
+    session: AsyncSession = Depends(async_session),
 ):
     """Verify a user."""
-    async with async_session_factory() as session:
-        user_manager = user_manager_factory(session, send_emails=send_email)
-        user = await user_manager.get_by_email(email)
-        user = await user_manager.update(
-            UserUpdate(is_verified=True),
-            user,
-        )
-        await user_manager.on_after_verify(user)
-        click.echo(f"User {email} verified")
+    user_manager = user_manager_factory(session, send_emails=send_email)
+    user = await user_manager.get_by_email(email)
+    user = await user_manager.update(
+        UserUpdate(is_verified=True),
+        user,
+    )
+    await user_manager.on_after_verify(user)
+    click.echo(f"User {email} verified")
 
 
 @users.command()
 @click.option("-e", "--email", type=str, required=True)
 @click.password_option("-p", "--password", type=str, prompt=True)
 @click.option("--send-email", is_flag=True, default=False)
-@async_command
 async def set_password(
     email: str,
     password: str,
     send_email: bool = False,
+    session: AsyncSession = Depends(async_session),
 ):
     """Activate a user."""
-    async with async_session_factory() as session:
-        user_manager = user_manager_factory(session, send_emails=send_email)
-        user = await user_manager.get_by_email(email)
-        user = await user_manager.update(
-            UserUpdate(password=password),
-            user,
-        )
-        await user_manager.on_after_reset_password(user)
-        click.echo(f"User {email} password updated")
+    user_manager = user_manager_factory(session, send_emails=send_email)
+    user = await user_manager.get_by_email(email)
+    user = await user_manager.update(
+        UserUpdate(password=password),
+        user,
+    )
+    await user_manager.on_after_reset_password(user)
+    click.echo(f"User {email} password updated")
 
 
 @users.command()
 @click.option("-e", "--email", type=str, required=True)
 @click.option("--send-email", is_flag=True, default=False)
-@async_command
 async def delete(
     email: str,
     send_email: bool = False,
+    session: AsyncSession = Depends(async_session),
 ):
     """Delete a user."""
-    async with async_session_factory() as session:
-        user_manager = user_manager_factory(session, send_emails=send_email)
-        user = await user_manager.get_by_email(email)
-        await user_manager.delete(user)
-        click.echo(f"User {email} deleted")
+    user_manager = user_manager_factory(session, send_emails=send_email)
+    user = await user_manager.get_by_email(email)
+    await user_manager.delete(user)
+    click.echo(f"User {email} deleted")
 
 
 @users.command(name="list")
-@async_command
-async def list_users():
+async def list_users(
+    session: AsyncSession = Depends(async_session),
+):
     """List all users."""
-    async with async_session_factory() as session:
-        all_users = await UserModelManager(session).all()
+    all_users = await UserModelManager(session).all()
 
     headers = [
         "ID",

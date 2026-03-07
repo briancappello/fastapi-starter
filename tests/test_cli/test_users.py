@@ -10,30 +10,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Import the commands to register them with the users group
 import app.cli.users  # noqa: F401
 
+from app.cli.click import dependency_overrides
 from app.cli.groups import main
+from app.db import async_session
 from app.db.managers import UserModelManager
 from app.db.models import User
 
 
 @pytest.fixture
-def patch_session_factory(monkeypatch, session: AsyncSession):
-    """Patch async_session_factory to use the test session."""
-    import sys
+def patch_session(session: AsyncSession):
+    """Override async_session dependency to use the test session."""
 
-    from contextlib import asynccontextmanager
-
-    @asynccontextmanager
-    async def patched_session_factory():
+    async def test_session():
         yield session
 
-    # Patch where async_session_factory is imported in the CLI users module
-    # The module is stored in sys.modules with its full path
-    users_module = sys.modules.get("app.cli.users")
-    if users_module:
-        monkeypatch.setattr(
-            users_module, "async_session_factory", patched_session_factory
-        )
+    dependency_overrides[async_session] = test_session
     yield
+    dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -43,8 +36,8 @@ def cli_runner():
 
 
 @pytest.fixture
-def cli(patch_session_factory, cli_runner):
-    """CLI runner with patched session factory."""
+def cli(patch_session, cli_runner):
+    """CLI runner with patched session dependency."""
     return cli_runner
 
 

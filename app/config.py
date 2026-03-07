@@ -44,6 +44,18 @@ class Config:
         "KAFKA_CONSUMERS", "all"
     )  # "all", "none", or comma-separated names
 
+    # Events / RabbitMQ
+    EVENT_MODE: str = os.getenv("EVENT_MODE", "all")
+    # "all" = run everything in one process (dev)
+    # "api" = web server + outbox writes only
+    # "relay" = outbox relay only
+    # "worker" = event handler worker(s) only
+    # "kafka" = Kafka source + outbox writes only
+    RABBITMQ_URL: str = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+    EVENT_WORKER_GROUPS: str = os.getenv(
+        "EVENT_WORKER_GROUPS", "all"
+    )  # "all" or comma-separated group names
+
     # Mail
     RESEND_API_KEY: str = os.getenv("RESEND_API_KEY")
     MAIL_CONFIG = MailConfig(
