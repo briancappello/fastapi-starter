@@ -1,4 +1,5 @@
 import logging
+
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
@@ -10,6 +11,7 @@ from .config import Config
 from .db import async_session_factory
 from .kafka import CONSUMER_CONFIGS, KafkaConsumerRegistry
 from .utils import collect_objects
+
 
 logger = logging.getLogger(__name__)
 

@@ -38,7 +38,10 @@ def main() -> None:
     cfg = Config(config_file)
 
     # Override version_locations with dynamically resolved paths
-    cfg.set_main_option("version_locations", ' '.join(str(loc) for loc in version_locations),)
+    cfg.set_main_option(
+        "version_locations",
+        " ".join(str(loc) for loc in version_locations),
+    )
 
     cli.run_cmd(cfg, options)
 

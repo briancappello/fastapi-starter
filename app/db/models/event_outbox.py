@@ -1,10 +1,10 @@
 from datetime import datetime
 from typing import Any
-
 from uuid import UUID
 
 from sqlalchemy import Index, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from .base import Base, Mapped, mapped_column, pk
 
