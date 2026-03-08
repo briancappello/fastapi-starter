@@ -62,15 +62,38 @@ class RabbitMQBroker:
         self._url = url or Config.RABBITMQ_URL
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractChannel | None = None
+        self._publish_channel: aio_pika.abc.AbstractChannel | None = None
         self._exchange: aio_pika.abc.AbstractExchange | None = None
 
     async def start(self) -> None:
-        """Connect to RabbitMQ and declare exchanges."""
+        """Connect to RabbitMQ and declare exchanges.
+
+        Opens two channels:
+        - A main channel with publisher confirms (used by the worker for
+          queue declarations and consuming).
+        - A publish channel **without** publisher confirms for fire-and-forget
+          relay publishing.  The outbox already guarantees durability — if
+          RabbitMQ drops a message the relay will re-send it from the
+          un-relayed outbox row.
+        """
         self._connection = await aio_pika.connect_robust(self._url)
         self._channel = await self._connection.channel()
 
-        # Main topic exchange
+        # Publish channel: no publisher confirms → publish() is fire-and-forget
+        self._publish_channel = await self._connection.channel(
+            publisher_confirms=False,
+        )
+
+        # Main topic exchange (declared on the main channel so the worker
+        # can bind queues; the publish channel sees the same exchange)
         self._exchange = await self._channel.declare_exchange(
+            self.EXCHANGE_NAME,
+            aio_pika.ExchangeType.TOPIC,
+            durable=True,
+        )
+
+        # Also get a reference on the publish channel for fire-and-forget sends
+        self._publish_exchange = await self._publish_channel.declare_exchange(
             self.EXCHANGE_NAME,
             aio_pika.ExchangeType.TOPIC,
             durable=True,
@@ -93,25 +116,31 @@ class RabbitMQBroker:
         logger.info(f"RabbitMQ broker connected to {self._url}")
 
     async def stop(self) -> None:
-        """Close channel and connection."""
-        if self._channel and not self._channel.is_closed:
-            await self._channel.close()
+        """Close channels and connection."""
+        for ch in (self._publish_channel, self._channel):
+            if ch and not ch.is_closed:
+                await ch.close()
         if self._connection and not self._connection.is_closed:
             await self._connection.close()
 
         self._exchange = None
+        self._publish_channel = None
         self._channel = None
         self._connection = None
 
         logger.info("RabbitMQ broker disconnected")
 
     async def publish(self, event: Event) -> None:
-        """Publish an event to the topic exchange.
+        """Publish an event to the topic exchange (fire-and-forget).
+
+        Uses the no-confirms publish channel for maximum throughput.
+        The outbox guarantees durability — if the message is lost,
+        the relay will re-send from the un-relayed outbox row.
 
         The routing key is the event's ``event_type`` (e.g., ``"user.created"``),
         which allows consumers to bind with topic patterns.
         """
-        if self._exchange is None:
+        if self._publish_exchange is None:
             raise RuntimeError("Broker not started. Call start() before publish().")
 
         import orjson
@@ -128,7 +157,7 @@ class RabbitMQBroker:
             },
         )
 
-        await self._exchange.publish(
+        await self._publish_exchange.publish(
             message,
             routing_key=event.event_type,
         )

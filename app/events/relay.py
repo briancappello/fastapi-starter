@@ -175,6 +175,10 @@ class OutboxRelay:
     async def _relay_batch(self) -> int:
         """Fetch and relay one batch of pending outbox events.
 
+        Publishes all events in a batch concurrently via
+        :func:`asyncio.gather` and marks them relayed with a single
+        bulk UPDATE, maximising throughput.
+
         Returns the number of events relayed.
         """
         from .registry import event_registry
@@ -195,40 +199,52 @@ class OutboxRelay:
             if not rows:
                 return 0
 
-            relayed_count = 0
+            # Phase 1: Deserialize all events up-front
+            events_to_publish: list[tuple[EventOutbox, Event]] = []
+            relayed_ids: list[int] = []
+
             for row in rows:
                 try:
                     event = event_registry.deserialize(row.event_type, row.payload)
-                    await self._broker.publish(event)
-
-                    # Mark as relayed
-                    await session.execute(
-                        update(EventOutbox)
-                        .where(EventOutbox.id == row.id)
-                        .values(relayed_at=datetime.now(timezone.utc))
-                    )
-                    relayed_count += 1
+                    events_to_publish.append((row, event))
                 except KeyError:
                     logger.error(
                         f"Unknown event type '{row.event_type}' "
                         f"in outbox row {row.id}, skipping"
                     )
-                    # Mark as relayed to prevent infinite retry
-                    await session.execute(
-                        update(EventOutbox)
-                        .where(EventOutbox.id == row.id)
-                        .values(relayed_at=datetime.now(timezone.utc))
-                    )
-                    relayed_count += 1
-                except Exception:
-                    logger.exception(
-                        f"Failed to relay outbox row {row.id} "
-                        f"({row.event_type}), will retry"
-                    )
-                    # Don't mark as relayed — will be retried next batch
-                    break  # Stop batch on first failure to maintain ordering
+                    # Mark unknown types as relayed to prevent infinite retry
+                    relayed_ids.append(row.id)
+
+            # Phase 2: Publish all events concurrently
+            if events_to_publish:
+                publish_results = await asyncio.gather(
+                    *(self._broker.publish(event) for _, event in events_to_publish),
+                    return_exceptions=True,
+                )
+
+                for (row, _event), pub_result in zip(events_to_publish, publish_results):
+                    if isinstance(pub_result, Exception):
+                        logger.exception(
+                            f"Failed to relay outbox row {row.id} "
+                            f"({row.event_type}), will retry",
+                            exc_info=pub_result,
+                        )
+                        # Don't mark as relayed — will be retried next batch.
+                        # Unlike the sequential approach we don't break here;
+                        # other publishes in the gather may have succeeded.
+                    else:
+                        relayed_ids.append(row.id)
+
+            # Phase 3: Bulk-mark all successfully relayed rows
+            if relayed_ids:
+                await session.execute(
+                    update(EventOutbox)
+                    .where(EventOutbox.id.in_(relayed_ids))
+                    .values(relayed_at=datetime.now(timezone.utc))
+                )
 
             await session.commit()
+            relayed_count = len(relayed_ids)
             if relayed_count > 0:
                 logger.debug(f"Relayed {relayed_count} events from outbox")
             return relayed_count
