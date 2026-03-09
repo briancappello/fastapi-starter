@@ -65,6 +65,23 @@ class InMemoryBroker:
         """Store event in the published list."""
         self.published.append(event)
 
+    async def publish_raw(
+        self,
+        body: bytes,
+        event_type: str,
+        event_id: str,
+    ) -> None:
+        """Store raw payload — used by the relay's optimized publish path.
+
+        Deserializes back to an Event for test assertion compatibility
+        (``broker.published`` is a list of Event objects).
+        """
+        import orjson
+
+        payload = orjson.loads(body)
+        event = event_registry.deserialize(event_type, payload)
+        self.published.append(event)
+
     def clear(self) -> None:
         """Clear all published events."""
         self.published.clear()

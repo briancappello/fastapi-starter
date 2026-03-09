@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from typing import TYPE_CHECKING
 
@@ -56,6 +57,10 @@ class EventWorker:
             If None, consumes for all registered groups.
         max_retries: Maximum retry attempts before dead-lettering.
         retry_delay_ms: Delay between retries in milliseconds.
+        prefetch_count: Max unacknowledged messages per channel.
+            Higher values improve throughput by pipelining messages,
+            but increase memory usage and redelivery on crash.
+            Tunable via ``EVENT_WORKER_PREFETCH`` env var.
     """
 
     def __init__(
@@ -65,17 +70,30 @@ class EventWorker:
         groups: set[str] | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay_ms: int = DEFAULT_RETRY_DELAY_MS,
+        prefetch_count: int = 10,
     ) -> None:
         self._broker = broker
         self._session_factory = session_factory
         self._groups = groups
         self._max_retries = max_retries
         self._retry_delay_ms = retry_delay_ms
-        self._tasks: list[asyncio.Task] = []
+        self._prefetch_count = prefetch_count
         self._queues: dict[str, aio_pika.abc.AbstractQueue] = {}
+        self._last_active: float = 0.0
 
-    async def start(self) -> None:
-        """Declare queues and start consuming for each group."""
+    @property
+    def last_active(self) -> float:
+        """Monotonic timestamp of the last successfully processed message."""
+        return self._last_active
+
+    async def run(self) -> None:
+        """Run the worker until cancelled.
+
+        Declares queues for each handler group, then consumes
+        concurrently from all groups inside an ``asyncio.TaskGroup``.
+        If any consumer task crashes, the TaskGroup cancels the others
+        and propagates the exception.
+        """
         groups = self._groups or handler_registry.get_groups()
 
         if not groups:
@@ -83,9 +101,10 @@ class EventWorker:
             return
 
         channel = self._broker.channel
-        # Set prefetch to process one message at a time per consumer
-        await channel.set_qos(prefetch_count=1)
+        await channel.set_qos(prefetch_count=self._prefetch_count)
 
+        # Declare queues for all groups
+        consume_tasks: list[tuple[aio_pika.abc.AbstractQueue, str]] = []
         for group in groups:
             handlers = handler_registry.get_handlers_for_group(group)
             if not handlers:
@@ -93,17 +112,63 @@ class EventWorker:
                 continue
 
             bindings = handler_registry.get_bindings_for_group(group)
-            await self._setup_group(channel, group, bindings)
+            main_queue = await self._setup_group(channel, group, bindings)
+            consume_tasks.append((main_queue, group))
+
+        if not consume_tasks:
+            logger.warning("No groups with handlers to consume for")
+            return
 
         logger.info(f"Event worker started for groups: {sorted(groups)}")
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for queue, group in consume_tasks:
+                    tg.create_task(
+                        self._consume_group(queue, group),
+                        name=f"worker:{group}",
+                    )
+        except* Exception as eg:
+            for exc in eg.exceptions:
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.error("Event worker task failed", exc_info=exc)
+            raise eg.exceptions[0] from None
+        finally:
+            self._queues.clear()
+            logger.info("Event worker stopped")
+
+    async def start(self) -> None:
+        """Start the worker as a detached background task.
+
+        Convenience wrapper for contexts that manage lifecycle
+        manually (e.g. tests, simple scripts). Prefer :meth:`run`
+        with a ``TaskGroup`` for production use.
+        """
+        self._task: asyncio.Task | None = asyncio.create_task(
+            self.run(), name="event-worker"
+        )
+
+    async def stop(self) -> None:
+        """Stop a worker started with :meth:`start`."""
+        task = getattr(self, "_task", None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
 
     async def _setup_group(
         self,
         channel: aio_pika.abc.AbstractChannel,
         group: str,
         bindings: set[str],
-    ) -> None:
-        """Set up queues and consumers for a handler group."""
+    ) -> aio_pika.abc.AbstractQueue:
+        """Set up queues and consumers for a handler group.
+
+        Returns the main queue for the group.
+        """
         queue_name = f"handlers.{group}"
         retry_queue_name = f"handlers.{group}.retry"
         dlq_name = f"handlers.{group}.dlq"
@@ -150,13 +215,8 @@ class EventWorker:
                 f"exchange '{RabbitMQBroker.EXCHANGE_NAME}'"
             )
 
-        # Start consuming
-        task = asyncio.create_task(
-            self._consume_group(main_queue, group),
-            name=f"worker:{group}",
-        )
-        self._tasks.append(task)
         self._queues[group] = main_queue
+        return main_queue
 
     async def _consume_group(
         self,
@@ -167,6 +227,7 @@ class EventWorker:
         async with queue.iterator() as queue_iter:
             async for message in queue_iter:
                 await self._process_message(message, group)
+                self._last_active = time.monotonic()
 
     async def _process_message(
         self,
@@ -174,6 +235,18 @@ class EventWorker:
         group: str,
     ) -> None:
         """Process a single message: deserialize, dispatch, ACK/NACK."""
+        from app.metrics import (
+            WORKER_DEAD_LETTERS_TOTAL,
+            WORKER_HANDLER_DURATION,
+            WORKER_IN_FLIGHT,
+            WORKER_MESSAGES_TOTAL,
+            WORKER_MESSAGE_DURATION,
+            WORKER_RETRIES_TOTAL,
+        )
+
+        msg_start = time.monotonic()
+        WORKER_IN_FLIGHT.labels(group=group).inc()
+
         headers = message.headers or {}
         retry_count = int(headers.get("x-retry-count", 0))
         event_type = headers.get("event_type", "unknown")
@@ -187,6 +260,9 @@ class EventWorker:
             )
             # Dead-letter undeserializable messages immediately
             await self._dead_letter(message, group, str(e))
+            WORKER_MESSAGES_TOTAL.labels(group=group, outcome="dlq").inc()
+            WORKER_DEAD_LETTERS_TOTAL.labels(group=group).inc()
+            WORKER_IN_FLIGHT.labels(group=group).dec()
             return
 
         handlers = handler_registry.get_handlers_for_group(group)
@@ -198,11 +274,19 @@ class EventWorker:
                     if self._pattern_matches(
                         registration.event_pattern, event.event_type
                     ):
+                        handler_start = time.monotonic()
                         await registration.handler(event, session)
+                        WORKER_HANDLER_DURATION.labels(
+                            group=group, handler=registration.name
+                        ).observe(time.monotonic() - handler_start)
 
                 await session.commit()
 
             await message.ack()
+            WORKER_MESSAGES_TOTAL.labels(group=group, outcome="ack").inc()
+            WORKER_MESSAGE_DURATION.labels(group=group).observe(
+                time.monotonic() - msg_start
+            )
             logger.debug(f"[{group}] Processed {event.event_type} (id={event.event_id})")
         except Exception as e:
             logger.error(
@@ -213,8 +297,14 @@ class EventWorker:
 
             if retry_count >= self._max_retries:
                 await self._dead_letter(message, group, f"Max retries exceeded: {e}")
+                WORKER_MESSAGES_TOTAL.labels(group=group, outcome="dlq").inc()
+                WORKER_DEAD_LETTERS_TOTAL.labels(group=group).inc()
             else:
                 await self._retry(message, retry_count)
+                WORKER_MESSAGES_TOTAL.labels(group=group, outcome="retry").inc()
+                WORKER_RETRIES_TOTAL.labels(group=group).inc()
+        finally:
+            WORKER_IN_FLIGHT.labels(group=group).dec()
 
     async def _retry(
         self,
@@ -289,19 +379,6 @@ class EventWorker:
         event_parts = event_type.split(".")
 
         return _match_parts(pattern_parts, event_parts)
-
-    async def stop(self) -> None:
-        """Stop all consumer tasks."""
-        for task in self._tasks:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        self._tasks.clear()
-        self._queues.clear()
-        logger.info("Event worker stopped")
 
 
 def _match_parts(pattern_parts: list[str], event_parts: list[str]) -> bool:

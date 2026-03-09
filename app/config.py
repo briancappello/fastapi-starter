@@ -55,6 +55,29 @@ class Config:
     EVENT_WORKER_GROUPS: str = os.getenv(
         "EVENT_WORKER_GROUPS", "all"
     )  # "all" or comma-separated group names
+    EVENT_WORKER_PREFETCH: int = int(os.getenv("EVENT_WORKER_PREFETCH", "10"))
+    EVENT_RELAY_BATCH_SIZE: int = int(os.getenv("EVENT_RELAY_BATCH_SIZE", "100"))
+    EVENT_RELAY_POLL_INTERVAL: float = float(
+        os.getenv("EVENT_RELAY_POLL_INTERVAL", "5.0")
+    )
+    EVENT_RELAY_PUBLISH_TIMEOUT: float = float(
+        os.getenv("EVENT_RELAY_PUBLISH_TIMEOUT", "30.0")
+    )
+
+    # Database pool
+    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "5"))
+    DB_POOL_MAX_OVERFLOW: int = int(os.getenv("DB_POOL_MAX_OVERFLOW", "10"))
+
+    # WebSocket
+    WS_ENABLED: bool = os.getenv("WS_ENABLED", "true").lower() == "true"
+    WS_AUTH_METHOD: str = os.getenv("WS_AUTH_METHOD", "none")
+    # "none"          = no authentication required
+    # "basic"         = HTTP Basic auth during upgrade handshake
+    # "token"         = token in query parameter (/ws/{client_id}?token=xxx)
+    # "first_message" = client sends {"type": "auth", "token": "xxx"} as first message
+    WS_AUTH_TIMEOUT: int = int(os.getenv("WS_AUTH_TIMEOUT", "5"))  # seconds
+    WS_HEARTBEAT_INTERVAL: int = int(os.getenv("WS_HEARTBEAT_INTERVAL", "30"))  # seconds
+    WS_HEARTBEAT_TIMEOUT: int = int(os.getenv("WS_HEARTBEAT_TIMEOUT", "10"))  # seconds
 
     # Mail
     RESEND_API_KEY: str = os.getenv("RESEND_API_KEY")

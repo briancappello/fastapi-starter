@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -46,6 +47,9 @@ class OutboxRelay:
         session_factory: Async session factory for DB access.
         batch_size: Max events to relay per batch.
         poll_interval: Seconds between fallback polls.
+        publish_timeout: Seconds before a single publish is considered
+            failed.  Prevents a hanging broker connection from holding
+            row locks indefinitely.
     """
 
     def __init__(
@@ -54,45 +58,75 @@ class OutboxRelay:
         session_factory: async_sessionmaker[AsyncSession],
         batch_size: int = 100,
         poll_interval: float = 5.0,
+        publish_timeout: float = 30.0,
     ) -> None:
         self._broker = broker
         self._session_factory = session_factory
         self._batch_size = batch_size
         self._poll_interval = poll_interval
+        self._publish_timeout = publish_timeout
         self._notify_event = asyncio.Event()
-        self._task: asyncio.Task | None = None
-        self._listener_task: asyncio.Task | None = None
-        self._running = False
+        self._last_active: float = 0.0
+
+    @property
+    def last_active(self) -> float:
+        """Monotonic timestamp of the last successful loop iteration."""
+        return self._last_active
+
+    async def run(self) -> None:
+        """Run the relay until cancelled.
+
+        This is the primary entry point. It runs the PG listener and
+        relay loop as concurrent tasks inside an ``asyncio.TaskGroup``.
+        If either task crashes, the TaskGroup cancels the other and
+        propagates the exception.
+
+        Usage from lifespan (via TaskGroup)::
+
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(relay.run())
+
+        Usage from CLI::
+
+            task = asyncio.create_task(relay.run())
+            await shutdown_event.wait()
+            task.cancel()
+        """
+        logger.info("Outbox relay started")
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._listen_notifications())
+                tg.create_task(self._relay_loop())
+        except* Exception as eg:
+            # Log all errors from the group, then re-raise the first
+            for exc in eg.exceptions:
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.error("Outbox relay task failed", exc_info=exc)
+            raise eg.exceptions[0] from None
+        finally:
+            logger.info("Outbox relay stopped")
 
     async def start(self) -> None:
-        """Start the relay (listener + poll loop)."""
-        self._running = True
-        self._listener_task = asyncio.create_task(
-            self._listen_notifications(),
-            name="outbox-relay-listener",
+        """Start the relay as a detached background task.
+
+        Convenience wrapper for contexts that manage lifecycle
+        manually (e.g. tests, simple scripts). Prefer :meth:`run`
+        with a ``TaskGroup`` for production use.
+        """
+        self._task: asyncio.Task | None = asyncio.create_task(
+            self.run(), name="outbox-relay"
         )
-        self._task = asyncio.create_task(
-            self._relay_loop(),
-            name="outbox-relay-loop",
-        )
-        logger.info("Outbox relay started")
 
     async def stop(self) -> None:
-        """Stop the relay gracefully."""
-        self._running = False
-        self._notify_event.set()  # Wake up the loop so it can exit
-
-        for task in (self._task, self._listener_task):
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        self._task = None
-        self._listener_task = None
-        logger.info("Outbox relay stopped")
+        """Stop a relay started with :meth:`start`."""
+        task = getattr(self, "_task", None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
 
     async def _listen_notifications(self) -> None:
         """Listen for PG NOTIFY using raw asyncpg connection.
@@ -107,7 +141,7 @@ class OutboxRelay:
         if url.startswith("postgresql+asyncpg://"):
             url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
-        while self._running:
+        while True:
             try:
                 conn = await asyncpg.connect(url)
                 try:
@@ -117,8 +151,8 @@ class OutboxRelay:
                     )
                     logger.info(f"Listening on PG channel '{OUTBOX_NOTIFY_CHANNEL}'")
 
-                    # Keep the connection alive while running
-                    while self._running:
+                    # Keep the connection alive
+                    while True:
                         await asyncio.sleep(1)
                 finally:
                     await conn.remove_listener(
@@ -144,7 +178,7 @@ class OutboxRelay:
 
     async def _relay_loop(self) -> None:
         """Main loop: wait for notification or poll interval, then relay."""
-        while self._running:
+        while True:
             try:
                 # Wait for either a notification or the poll interval
                 try:
@@ -157,14 +191,13 @@ class OutboxRelay:
 
                 self._notify_event.clear()
 
-                if not self._running:
-                    break
-
                 # Relay pending events
                 relayed = await self._relay_batch()
                 # If we relayed a full batch, there might be more
-                while relayed == self._batch_size and self._running:
+                while relayed == self._batch_size:
                     relayed = await self._relay_batch()
+
+                self._last_active = time.monotonic()
 
             except asyncio.CancelledError:
                 raise
@@ -179,9 +212,25 @@ class OutboxRelay:
         :func:`asyncio.gather` and marks them relayed with a single
         bulk UPDATE, maximising throughput.
 
+        The final commit (marking events as relayed) is shielded from
+        cancellation to prevent inconsistency: if events have been
+        published to the broker but the commit is cancelled, they
+        would be re-relayed on next startup (duplicate delivery).
+
         Returns the number of events relayed.
         """
-        from .registry import event_registry
+        from app.metrics import (
+            RELAY_BATCH_DURATION,
+            RELAY_BATCH_SIZE,
+            RELAY_BATCH_TOTAL,
+            RELAY_COMMIT_DURATION,
+            RELAY_EVENTS_TOTAL,
+            RELAY_PENDING_GAUGE,
+            RELAY_PUBLISH_DURATION,
+            RELAY_PUBLISH_ERRORS,
+        )
+
+        batch_start = time.monotonic()
 
         async with self._session_factory() as session:
             # SELECT pending rows with row-level locking
@@ -196,58 +245,89 @@ class OutboxRelay:
             result = await session.execute(stmt)
             rows = list(result.scalars().all())
 
+            RELAY_BATCH_TOTAL.inc()
+
             if not rows:
+                RELAY_BATCH_SIZE.observe(0)
+                RELAY_BATCH_DURATION.observe(time.monotonic() - batch_start)
                 return 0
 
-            # Phase 1: Deserialize all events up-front
-            events_to_publish: list[tuple[EventOutbox, Event]] = []
+            RELAY_PENDING_GAUGE.set(len(rows))
+
+            # Phase 1: Prepare raw payloads for publishing.
+            # The outbox already stores the event as a JSONB dict, so we
+            # serialize directly with orjson — no Pydantic round-trip needed.
+            import orjson
+
+            rows_to_publish: list[tuple[EventOutbox, bytes]] = []
             relayed_ids: list[int] = []
 
             for row in rows:
-                try:
-                    event = event_registry.deserialize(row.event_type, row.payload)
-                    events_to_publish.append((row, event))
-                except KeyError:
-                    logger.error(
-                        f"Unknown event type '{row.event_type}' "
-                        f"in outbox row {row.id}, skipping"
-                    )
-                    # Mark unknown types as relayed to prevent infinite retry
-                    relayed_ids.append(row.id)
+                body = orjson.dumps(row.payload)
+                rows_to_publish.append((row, body))
 
             # Phase 2: Publish all events concurrently
-            if events_to_publish:
+            if rows_to_publish:
+                publish_start = time.monotonic()
+
+                async def _publish_one(row: EventOutbox, body: bytes):
+                    return await asyncio.wait_for(
+                        self._broker.publish_raw(
+                            body=body,
+                            event_type=row.event_type,
+                            event_id=str(row.event_id),
+                        ),
+                        timeout=self._publish_timeout,
+                    )
+
                 publish_results = await asyncio.gather(
-                    *(self._broker.publish(event) for _, event in events_to_publish),
+                    *(_publish_one(row, body) for row, body in rows_to_publish),
                     return_exceptions=True,
                 )
+                RELAY_PUBLISH_DURATION.observe(time.monotonic() - publish_start)
 
-                for (row, _event), pub_result in zip(events_to_publish, publish_results):
+                for (row, _body), pub_result in zip(rows_to_publish, publish_results):
                     if isinstance(pub_result, Exception):
+                        RELAY_PUBLISH_ERRORS.inc()
                         logger.exception(
                             f"Failed to relay outbox row {row.id} "
                             f"({row.event_type}), will retry",
                             exc_info=pub_result,
                         )
                         # Don't mark as relayed — will be retried next batch.
-                        # Unlike the sequential approach we don't break here;
-                        # other publishes in the gather may have succeeded.
                     else:
                         relayed_ids.append(row.id)
 
             # Phase 3: Bulk-mark all successfully relayed rows
+            # Shielded from cancellation so we don't publish to the broker
+            # but fail to mark rows, causing duplicates on restart.
             if relayed_ids:
-                await session.execute(
-                    update(EventOutbox)
-                    .where(EventOutbox.id.in_(relayed_ids))
-                    .values(relayed_at=datetime.now(timezone.utc))
-                )
+                commit_start = time.monotonic()
+                await asyncio.shield(self._mark_relayed(session, relayed_ids))
+                RELAY_COMMIT_DURATION.observe(time.monotonic() - commit_start)
 
-            await session.commit()
             relayed_count = len(relayed_ids)
+            RELAY_BATCH_SIZE.observe(relayed_count)
+            RELAY_EVENTS_TOTAL.inc(relayed_count)
+            RELAY_BATCH_DURATION.observe(time.monotonic() - batch_start)
+
             if relayed_count > 0:
                 logger.debug(f"Relayed {relayed_count} events from outbox")
             return relayed_count
+
+    @staticmethod
+    async def _mark_relayed(session: AsyncSession, relayed_ids: list[int]) -> None:
+        """Mark outbox rows as relayed and commit.
+
+        Extracted as a separate method so it can be wrapped with
+        ``asyncio.shield``.
+        """
+        await session.execute(
+            update(EventOutbox)
+            .where(EventOutbox.id.in_(relayed_ids))
+            .values(relayed_at=datetime.now(timezone.utc))
+        )
+        await session.commit()
 
     async def relay_once(self) -> int:
         """Relay all pending events (for testing/manual invocation).

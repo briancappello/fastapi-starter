@@ -38,7 +38,13 @@ def list_events():
             cls = event_registry.get(et)
             module = cls.__module__ if cls else "?"
             rows.append([et, f"{module}.{cls.__name__}" if cls else "?"])
-        click.echo(tabulate(rows, headers=["Event Type", "Class"], tablefmt="simple"))
+        click.echo(
+            tabulate(
+                rows,
+                headers=["Event Type", "Class"],
+                tablefmt="simple",
+            )
+        )
     else:
         click.echo("  (none)")
 
@@ -94,11 +100,10 @@ async def run_relay():
         broker=broker,
         session_factory=async_session_factory,
     )
-    await relay.start()
 
     click.echo("Outbox relay running. Press Ctrl+C to stop.")
 
-    # Wait for shutdown signal
+    # Set up signal-based cancellation
     shutdown_event = asyncio.Event()
 
     def signal_handler():
@@ -109,9 +114,29 @@ async def run_relay():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
 
-    await shutdown_event.wait()
+    # Run the relay until signal received
+    relay_task = asyncio.create_task(relay.run())
 
-    await relay.stop()
+    # Wait for either shutdown signal or relay crash
+    done, _ = await asyncio.wait(
+        [relay_task, asyncio.create_task(shutdown_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    # If the relay task finished first, it crashed
+    if relay_task in done:
+        try:
+            relay_task.result()  # Raises the exception
+        except asyncio.CancelledError:
+            pass
+    else:
+        # Shutdown signal — cancel the relay
+        relay_task.cancel()
+        try:
+            await relay_task
+        except asyncio.CancelledError:
+            pass
+
     await broker.stop()
     click.echo("Relay stopped.")
 
@@ -162,11 +187,10 @@ async def run_worker(groups: str | None):
         session_factory=async_session_factory,
         groups=group_set,
     )
-    await worker.start()
 
     click.echo("Worker running. Press Ctrl+C to stop.")
 
-    # Wait for shutdown signal
+    # Set up signal-based cancellation
     shutdown_event = asyncio.Event()
 
     def signal_handler():
@@ -177,8 +201,28 @@ async def run_worker(groups: str | None):
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
 
-    await shutdown_event.wait()
+    # Run the worker until signal received
+    worker_task = asyncio.create_task(worker.run())
 
-    await worker.stop()
+    # Wait for either shutdown signal or worker crash
+    done, _ = await asyncio.wait(
+        [worker_task, asyncio.create_task(shutdown_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    # If the worker task finished first, it crashed
+    if worker_task in done:
+        try:
+            worker_task.result()  # Raises the exception
+        except asyncio.CancelledError:
+            pass
+    else:
+        # Shutdown signal — cancel the worker
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+
     await broker.stop()
     click.echo("Worker stopped.")

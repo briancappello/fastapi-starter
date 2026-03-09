@@ -13,17 +13,13 @@ from __future__ import annotations
 
 import logging
 
-from typing import TYPE_CHECKING
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.events import emit_event
 
 from .events import FeedOneReceived, FeedThreeReceived, FeedTwoReceived
+from .schema import KafkaMessageSchema
 
-
-if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    from .schema import KafkaMessageSchema
 
 logger = logging.getLogger(__name__)
 

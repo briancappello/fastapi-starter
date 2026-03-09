@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import aio_pika
+import orjson
 
 from app.config import Config
+from app.metrics import BROKER_PUBLISH_DURATION, BROKER_PUBLISH_TOTAL
 
 
 if TYPE_CHECKING:
@@ -143,7 +146,7 @@ class RabbitMQBroker:
         if self._publish_exchange is None:
             raise RuntimeError("Broker not started. Call start() before publish().")
 
-        import orjson
+        start = time.monotonic()
 
         body = orjson.dumps(event.model_dump(mode="json"))
         message = aio_pika.Message(
@@ -161,9 +164,55 @@ class RabbitMQBroker:
             message,
             routing_key=event.event_type,
         )
+
+        duration = time.monotonic() - start
+        BROKER_PUBLISH_DURATION.labels(event_type=event.event_type).observe(duration)
+        BROKER_PUBLISH_TOTAL.labels(event_type=event.event_type).inc()
+
         logger.debug(
             f"Published {event.event_type} (id={event.event_id}) "
             f"to exchange '{self.EXCHANGE_NAME}'"
+        )
+
+    async def publish_raw(
+        self,
+        body: bytes,
+        event_type: str,
+        event_id: str,
+    ) -> None:
+        """Publish a pre-serialized event (avoids Pydantic round-trip).
+
+        Used by the outbox relay which already has the JSON payload
+        from the database, eliminating the deserialize→reserialize
+        overhead of :meth:`publish`.
+        """
+        if self._publish_exchange is None:
+            raise RuntimeError("Broker not started. Call start() before publish().")
+
+        start = time.monotonic()
+
+        message = aio_pika.Message(
+            body=body,
+            content_type="application/json",
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            headers={
+                "event_type": event_type,
+                "event_id": event_id,
+                "x-retry-count": 0,
+            },
+        )
+
+        await self._publish_exchange.publish(
+            message,
+            routing_key=event_type,
+        )
+
+        duration = time.monotonic() - start
+        BROKER_PUBLISH_DURATION.labels(event_type=event_type).observe(duration)
+        BROKER_PUBLISH_TOTAL.labels(event_type=event_type).inc()
+
+        logger.debug(
+            f"Published {event_type} (id={event_id}) to exchange '{self.EXCHANGE_NAME}'"
         )
 
     @property

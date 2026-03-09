@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from typing import TYPE_CHECKING
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.models.event_outbox import EventOutbox
+from app.metrics import OUTBOX_EMIT_DURATION, OUTBOX_EMIT_TOTAL
 
 
 if TYPE_CHECKING:
@@ -36,6 +38,8 @@ async def emit_event(event: Event, session: AsyncSession) -> bool:
     Returns:
         True if the event was inserted, False if it was a duplicate.
     """
+    start = time.monotonic()
+
     stmt = (
         pg_insert(EventOutbox)
         .values(
@@ -49,7 +53,11 @@ async def emit_event(event: Event, session: AsyncSession) -> bool:
     result = await session.execute(stmt)
     inserted = result.rowcount > 0  # type: ignore[union-attr]
 
+    duration = time.monotonic() - start
+    OUTBOX_EMIT_DURATION.labels(event_type=event.event_type).observe(duration)
+
     if inserted:
+        OUTBOX_EMIT_TOTAL.labels(event_type=event.event_type, source=event.source).inc()
         logger.debug(
             f"Emitted event {event.event_type} "
             f"(id={event.event_id}, source={event.source})"

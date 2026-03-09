@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
@@ -77,13 +78,43 @@ class KafkaConsumerRegistry:
         allowed = [c.strip() for c in consumers_setting.split(",")]
         return config.name in allowed
 
-    async def start_all(self) -> None:
-        """Start all registered consumers that match KAFKA_CONSUMERS filter."""
+    async def run_all(self, tg: asyncio.TaskGroup) -> None:
+        """Start all matching consumers as tasks in the given TaskGroup.
+
+        This is the preferred entry point for production use with
+        structured concurrency. Each consumer's ``run()`` coroutine
+        is launched as a task in the provided ``TaskGroup``.
+
+        Args:
+            tg: The TaskGroup to create consumer tasks in.
+        """
         if not Config.KAFKA_ENABLED:
             logger.info("Kafka is disabled (KAFKA_ENABLED=false)")
             return
 
-        # Import here to avoid circular imports
+        from .consumer import KafkaConsumerService
+
+        for config in self._configs:
+            if self._should_start(config):
+                consumer = KafkaConsumerService(config, self.session_factory)
+                self._consumers.append(consumer)
+                tg.create_task(
+                    consumer.run(),
+                    name=f"kafka:{config.name}",
+                )
+                logger.info(f"Starting consumer: {config.name}")
+
+    async def start_all(self) -> None:
+        """Start all registered consumers as detached background tasks.
+
+        Convenience wrapper for contexts that manage lifecycle
+        manually. Prefer :meth:`run_all` with a ``TaskGroup`` for
+        production use.
+        """
+        if not Config.KAFKA_ENABLED:
+            logger.info("Kafka is disabled (KAFKA_ENABLED=false)")
+            return
+
         from .consumer import KafkaConsumerService
 
         for config in self._configs:
@@ -105,13 +136,21 @@ class KafkaConsumerRegistry:
         """Return status dict for all consumers (for health endpoint)."""
         return {
             c.config.name: {
-                "running": c._task is not None and not c._task.done(),
+                "running": (
+                    hasattr(c, "_task") and c._task is not None and not c._task.done()
+                ),
+                "last_active": c.last_active,
                 "topics": c.config.topics,
                 "bootstrap_servers": c.config.get_bootstrap_servers(),
                 "group_id": c.config.get_group_id(),
             }
             for c in self._consumers
         }
+
+    @property
+    def consumers(self) -> list[KafkaConsumerService]:
+        """Return all active consumer instances."""
+        return self._consumers.copy()
 
     @property
     def configs(self) -> list[ConsumerConfig]:

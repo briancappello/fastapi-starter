@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -40,40 +41,63 @@ class KafkaConsumerService:
         self.config = config
         self.session_factory = session_factory
         self._consumer: AIOKafkaConsumer | None = None
-        self._task: asyncio.Task | None = None
+        self._last_active: float = 0.0
 
-    async def start(self) -> None:
-        """Start the consumer and begin processing messages."""
+    @property
+    def last_active(self) -> float:
+        """Monotonic timestamp of the last successfully processed message."""
+        return self._last_active
+
+    async def run(self) -> None:
+        """Run the consumer until cancelled.
+
+        Connects to Kafka, seeks to DB offsets, and processes messages.
+        This is the primary entry point — use inside an
+        ``asyncio.TaskGroup`` for structured concurrency.
+        """
         self._consumer = AIOKafkaConsumer(
             *self.config.topics,
             bootstrap_servers=self.config.get_bootstrap_servers(),
             group_id=self.config.get_group_id(),
-            enable_auto_commit=False,  # We manage offsets in DB
-            auto_offset_reset="earliest",  # Fallback, but we'll seek to DB offsets
+            enable_auto_commit=False,
+            auto_offset_reset="earliest",
         )
-        await self._consumer.start()
+        try:
+            await self._consumer.start()
+            await self._seek_to_db_offsets()
 
-        # Seek to DB-stored offsets
-        await self._seek_to_db_offsets()
+            logger.info(
+                f"[{self.config.name}] Consumer started, topics={self.config.topics}"
+            )
 
-        self._task = asyncio.create_task(
-            self._consume(),
-            name=f"consumer:{self.config.name}",
+            await self._consume()
+        finally:
+            if self._consumer:
+                await self._consumer.stop()
+                self._consumer = None
+            logger.info(f"[{self.config.name}] Consumer stopped")
+
+    async def start(self) -> None:
+        """Start the consumer as a detached background task.
+
+        Convenience wrapper for contexts that manage lifecycle
+        manually. Prefer :meth:`run` with a ``TaskGroup`` for
+        production use.
+        """
+        self._task: asyncio.Task | None = asyncio.create_task(
+            self.run(), name=f"consumer:{self.config.name}"
         )
 
     async def stop(self) -> None:
-        """Stop the consumer gracefully."""
-        if self._task:
-            self._task.cancel()
+        """Stop a consumer started with :meth:`start`."""
+        task = getattr(self, "_task", None)
+        if task:
+            task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                await task
+            except (asyncio.CancelledError, Exception):
                 pass
             self._task = None
-
-        if self._consumer:
-            await self._consumer.stop()
-            self._consumer = None
 
     async def _seek_to_db_offsets(self) -> None:
         """Seek to offsets stored in database, or 0 if none exist."""
@@ -105,13 +129,16 @@ class KafkaConsumerService:
                     # Seek to next offset after the last committed one
                     seek_offset = row + 1
                     logger.info(
-                        f"[{self.config.name}] Seeking {tp.topic}:{tp.partition} to offset {seek_offset}"
+                        f"[{self.config.name}] Seeking "
+                        f"{tp.topic}:{tp.partition} to offset "
+                        f"{seek_offset}"
                     )
                 else:
                     # No offset in DB, start from 0
                     seek_offset = 0
                     logger.info(
-                        f"[{self.config.name}] No stored offset for {tp.topic}:{tp.partition}, starting from 0"
+                        f"[{self.config.name}] No stored offset for "
+                        f"{tp.topic}:{tp.partition}, starting from 0"
                     )
 
                 self._consumer.seek(tp, seek_offset)
@@ -124,10 +151,12 @@ class KafkaConsumerService:
         async for message in self._consumer:
             try:
                 await self._process_message(message)
+                self._last_active = time.monotonic()
             except Exception as e:
                 logger.error(
                     f"[{self.config.name}] Failed on "
-                    f"{message.topic}:{message.partition}@{message.offset}: {e}",
+                    f"{message.topic}:{message.partition}@"
+                    f"{message.offset}: {e}",
                     exc_info=True,
                 )
                 # Don't bump offset - message will be reprocessed on restart
@@ -140,6 +169,10 @@ class KafkaConsumerService:
         3. Call handler
         4. Update offset
         5. Commit transaction
+
+        The commit is shielded from cancellation to prevent
+        processing a message but failing to record its offset,
+        which would cause it to be reprocessed on restart.
         """
         # Parse message using the schema from config
         try:
@@ -148,12 +181,13 @@ class KafkaConsumerService:
         except Exception as e:
             logger.error(
                 f"[{self.config.name}] Failed to parse message at "
-                f"{message.topic}:{message.partition}@{message.offset}: {e}"
+                f"{message.topic}:{message.partition}@{message.offset}"
+                f": {e}"
             )
             # Skip malformed messages by still updating offset
             async with self.session_factory() as session:
                 await self._update_offset(session, message)
-                await session.commit()
+                await asyncio.shield(session.commit())
             return
 
         async with self.session_factory() as session:
@@ -190,11 +224,13 @@ class KafkaConsumerService:
             # Update offset
             await self._update_offset(session, message)
 
-            # Commit the transaction
-            await session.commit()
+            # Commit the transaction — shielded from cancellation
+            # so we don't process + handle but fail to record offset
+            await asyncio.shield(session.commit())
 
             logger.debug(
-                f"[{self.config.name}] Processed {message.topic}:{message.partition}@{message.offset}"
+                f"[{self.config.name}] Processed "
+                f"{message.topic}:{message.partition}@{message.offset}"
             )
 
     async def _update_offset(self, session: AsyncSession, message) -> None:
